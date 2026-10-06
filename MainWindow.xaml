@@ -1,0 +1,561 @@
+<Window x:Class="ClipboardHistory.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:conv="clr-namespace:ClipboardHistory.Converters"
+        xmlns:sel="clr-namespace:ClipboardHistory.Selectors"
+        xmlns:ui="clr-namespace:ClipboardHistory.Ui"
+        Title="剪贴板历史"
+        Height="620" Width="420"
+        MinHeight="420" MinWidth="360"
+        FontFamily="{StaticResource Font.Ui}"
+        TextOptions.TextFormattingMode="Display"
+        Background="{DynamicResource Brush.WindowBg}"
+        PreviewKeyDown="Window_PreviewKeyDown">
+
+    <Window.Resources>
+        <!-- ── 转换器 ── -->
+        <conv:RelativeTimeConverter x:Key="RelativeTime" />
+        <conv:KindIconConverter x:Key="KindIcon" />
+        <conv:FileEntryIconConverter x:Key="EntryIcon" />
+        <conv:PinGlyphConverter x:Key="PinGlyph" />
+        <conv:PinActionTextConverter x:Key="PinActionText" />
+        <conv:EmptyTextToVisibilityConverter x:Key="EmptyText" />
+        <conv:ClampHeightConverter x:Key="ClampHeight" />
+        <conv:ExpandToScrollBarConverter x:Key="ExpandScroll" />
+        <conv:FadeMaskConverter x:Key="FadeMask" />
+        <conv:ImagePathConverter x:Key="ImagePath" />
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+
+        <!-- 卡片上那行"3 分钟前"。抽成样式是因为三套卡片模板都要用，逻辑完全一样 -->
+        <Style x:Key="Style.CardTime" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}" />
+            <Setter Property="Text">
+                <Setter.Value>
+                    <MultiBinding Converter="{StaticResource RelativeTime}">
+                        <Binding Path="CreatedAt" />
+                        <!-- 第二个绑定只是让文案每 30 秒重算一次，见 Ui/TimeTicker.cs -->
+                        <Binding Path="Now" Source="{x:Static ui:TimeTicker.Instance}" />
+                    </MultiBinding>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="ToolTip"
+                    Value="{Binding CreatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" />
+        </Style>
+
+        <!-- ══════════════════════════════════════════
+             卡片模板：文字 / 图片 / 文件
+             ══════════════════════════════════════════ -->
+
+        <!-- ── 文字卡片 ── -->
+        <DataTemplate x:Key="Tpl.Card.Text">
+            <Border Style="{StaticResource Style.Card}" MouseLeftButtonUp="Card_Click">
+                <!-- 右键菜单。ContextMenu 是独立的弹出树，但它挂在哪个元素上就继承哪个的 DataContext，
+                     所以这里的绑定拿到的仍然是这条 ClipItem -->
+                <Border.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="复制" Click="MenuCopy_Click" />
+                        <MenuItem Header="{Binding Pinned, Converter={StaticResource PinActionText}}"
+                                  Click="MenuPin_Click" />
+                        <MenuItem Header="删除" Click="MenuDelete_Click" />
+                    </ContextMenu>
+                </Border.ContextMenu>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0"
+                               FontFamily="{StaticResource Font.Icon}"
+                               FontSize="15"
+                               Margin="0,1,10,0"
+                               VerticalAlignment="Top"
+                               Foreground="{DynamicResource Brush.TextSecondary}"
+                               Text="{Binding Kind, Converter={StaticResource KindIcon}}" />
+
+                    <!-- 右侧留 70px 给圆形按钮，避免长文字压到按钮下面 -->
+                    <StackPanel Grid.Column="1" Margin="0,0,70,0">
+
+                        <!--
+                            内容区。收起时最多 54px（3 行）并底部渐隐；展开时最多 300px，
+                            再多就在卡片内部滚动。用 ScrollViewer 而不是 Border 是为了展开态能滚。
+
+                            滚动条：收起时 Hidden、展开时 Auto（见 ExpandToScrollBarConverter）。
+                            收起态必须是 Hidden——不显示也不占位，这样 ActualHeight 才是文字本来的
+                            高度，ClampBehavior 才量得准。收起时另外靠 CanScroll=false 把滚轮拦下来，
+                            不让用户绕过"展开"偷看后面的内容。
+                        -->
+                        <ScrollViewer x:Name="ClampScroll"
+                                      Style="{StaticResource Style.CardScrollViewer}"
+                                      VerticalAlignment="Top"
+                                      HorizontalScrollBarVisibility="Disabled"
+                                      VerticalScrollBarVisibility="{Binding IsChecked, ElementName=ExpandToggle,
+                                                                   Converter={StaticResource ExpandScroll}}"
+                                      ui:ScrollChainBehavior.IsEnabled="True"
+                                      ui:ScrollChainBehavior.CanScroll="{Binding IsChecked, ElementName=ExpandToggle}"
+                                      MaxHeight="{Binding IsChecked, ElementName=ExpandToggle,
+                                                  Converter={StaticResource ClampHeight}, ConverterParameter=54|300}">
+                            <ScrollViewer.OpacityMask>
+                                <MultiBinding Converter="{StaticResource FadeMask}">
+                                    <Binding Path="(ui:ClampBehavior.IsOverflowing)" ElementName="Body" />
+                                    <Binding Path="IsChecked" ElementName="ExpandToggle" />
+                                </MultiBinding>
+                            </ScrollViewer.OpacityMask>
+
+                            <!-- 用 LinkifiedTextBlock 而不是普通 TextBlock：会把里面的网址
+                                 渲染成可点的链接。点链接开浏览器，点卡片其它地方仍然是复制 -->
+                            <ui:LinkifiedTextBlock x:Name="Body"
+                                                   ui:ClampBehavior.ClampHeight="54"
+                                                   FontSize="13"
+                                                   LineHeight="18"
+                                                   TextWrapping="Wrap"
+                                                   SourceText="{Binding Text}"
+                                                   Foreground="{DynamicResource Brush.TextPrimary}" />
+                        </ScrollViewer>
+
+                        <!-- 时间 + 展开按钮 -->
+                        <Grid Margin="0,5,0,0">
+                            <TextBlock Style="{StaticResource Style.CardTime}" HorizontalAlignment="Left" />
+                            <ToggleButton x:Name="ExpandToggle"
+                                          Style="{StaticResource Style.ExpandToggle}"
+                                          HorizontalAlignment="Right"
+                                          Visibility="{Binding (ui:ClampBehavior.IsOverflowing),
+                                                       ElementName=Body, Converter={StaticResource BoolToVis}}" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Style="{StaticResource Style.CardActions}">
+                        <Button Style="{StaticResource Style.PinButton}"
+                                Content="{Binding Pinned, Converter={StaticResource PinGlyph}}"
+                                ToolTip="置顶"
+                                Click="Pin_Click" />
+                        <Button Style="{StaticResource Style.DeleteButton}"
+                                Content="{x:Static ui:Icons.Delete}"
+                                ToolTip="删除"
+                                Click="Delete_Click" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- ── 图片卡片 ── -->
+        <DataTemplate x:Key="Tpl.Card.Image">
+            <Border Style="{StaticResource Style.Card}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <!--
+                        缩略图区。收起时只露一行，展开时最多 300px，再多就在卡片内部滚。
+                        右侧留 62px 给圆形按钮，免得缩略图滑到按钮底下。
+                    -->
+                    <ScrollViewer Grid.Row="0"
+                                  Style="{StaticResource Style.CardScrollViewer}"
+                                  Margin="0,0,62,0"
+                                  VerticalAlignment="Top"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="{Binding IsChecked, ElementName=ImageExpand,
+                                                               Converter={StaticResource ExpandScroll}}"
+                                  ui:ScrollChainBehavior.IsEnabled="True"
+                                  ui:ScrollChainBehavior.CanScroll="{Binding IsChecked, ElementName=ImageExpand}"
+                                  MaxHeight="{Binding IsChecked, ElementName=ImageExpand,
+                                              Converter={StaticResource ClampHeight}, ConverterParameter=82|300}">
+                        <ScrollViewer.OpacityMask>
+                            <MultiBinding Converter="{StaticResource FadeMask}">
+                                <Binding Path="(ui:ClampBehavior.IsOverflowing)" ElementName="Thumbnails" />
+                                <Binding Path="IsChecked" ElementName="ImageExpand" />
+                            </MultiBinding>
+                        </ScrollViewer.OpacityMask>
+
+                        <!--
+                            阈值 82 = 缩略图高 76 + 下间距 6。
+                            不能只写 76：缩略图块自带 6px 的下间距，一行排下来实际占 82px，
+                            按 76 判断的话单张图片也会被判成"装不下"，平白多出一个点了没反应的"展开"按钮。
+                        -->
+                        <ItemsControl x:Name="Thumbnails"
+                                      ui:ClampBehavior.ClampHeight="82"
+                                      ItemsSource="{Binding Images}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Width="112" Height="76"
+                                            Margin="0,0,6,6"
+                                            CornerRadius="4"
+                                            ClipToBounds="True"
+                                            Background="{DynamicResource Brush.AccentSoft}">
+                                        <!-- Stretch=Uniform 而不是 UniformToFill：
+                                             宁可留白也要把整张图露全，裁掉一半反而看不出是什么 -->
+                                        <Image Stretch="Uniform"
+                                               Source="{Binding ThumbFile, Converter={StaticResource ImagePath}}" />
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <!-- 摘要 + 时间 + 展开 -->
+                    <StackPanel Grid.Row="1" Margin="0,4,62,0">
+                        <TextBlock FontSize="13"
+                                   TextWrapping="NoWrap"
+                                   TextTrimming="CharacterEllipsis"
+                                   Foreground="{DynamicResource Brush.TextPrimary}"
+                                   Text="{Binding ImageSummary}" />
+                        <Grid Margin="0,5,0,0">
+                            <TextBlock Style="{StaticResource Style.CardTime}" HorizontalAlignment="Left" />
+                            <ToggleButton x:Name="ImageExpand"
+                                          Style="{StaticResource Style.ExpandToggle}"
+                                          HorizontalAlignment="Right"
+                                          Visibility="{Binding (ui:ClampBehavior.IsOverflowing),
+                                                       ElementName=Thumbnails, Converter={StaticResource BoolToVis}}" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Style="{StaticResource Style.CardActions}">
+                        <Button Style="{StaticResource Style.PinButton}"
+                                Content="{Binding Pinned, Converter={StaticResource PinGlyph}}"
+                                ToolTip="置顶"
+                                Click="Pin_Click" />
+                        <Button Style="{StaticResource Style.DeleteButton}"
+                                Content="{x:Static ui:Icons.Delete}"
+                                ToolTip="删除"
+                                Click="Delete_Click" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- ── 文件 / 文件夹卡片 ── -->
+        <DataTemplate x:Key="Tpl.Card.Files">
+            <Border Style="{StaticResource Style.Card}"
+                    MouseLeftButtonUp="Card_Click"
+                    ToolTip="{Binding FileSummary}">
+                <Border.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="复制" Click="MenuCopy_Click" />
+                        <MenuItem Header="{Binding Pinned, Converter={StaticResource PinActionText}}"
+                                  Click="MenuPin_Click" />
+                        <MenuItem Header="删除" Click="MenuDelete_Click" />
+                    </ContextMenu>
+                </Border.ContextMenu>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <!--
+                        条目列表。没有单独的"摘要行"——那会和这里的第一个条目重复一遍文件名。
+                        收起时露一行半并底部渐隐，展开后最多 300px，再多在卡片内部滚。
+
+                        阈值 58 ≈ 一行半：一个条目行（名字 17 + 路径 15 + 下间距 6）是 38px，
+                        卡在 44 的话第二行被裁得一干二净，渐隐等于盖在空气上，
+                        反而看不出"下面还有"。留出半行让第二个条目的名字露一截、再淡出，
+                        "还有更多"的意思才传达到。
+                    -->
+                    <ScrollViewer Grid.Row="0"
+                                  Style="{StaticResource Style.CardScrollViewer}"
+                                  Margin="0,0,62,0"
+                                  VerticalAlignment="Top"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="{Binding IsExpanded,
+                                                               Converter={StaticResource ExpandScroll}}"
+                                  ui:ScrollChainBehavior.IsEnabled="True"
+                                  ui:ScrollChainBehavior.CanScroll="{Binding IsExpanded}"
+                                  MaxHeight="{Binding IsExpanded,
+                                              Converter={StaticResource ClampHeight}, ConverterParameter=58|300}">
+                        <ScrollViewer.OpacityMask>
+                            <MultiBinding Converter="{StaticResource FadeMask}">
+                                <Binding Path="(ui:ClampBehavior.IsOverflowing)" ElementName="FileEntries" />
+                                <Binding Path="IsExpanded" />
+                            </MultiBinding>
+                        </ScrollViewer.OpacityMask>
+
+                        <ItemsControl x:Name="FileEntries"
+                                      ui:ClampBehavior.ClampHeight="58"
+                                      Loaded="FileEntries_Loaded"
+                                      ItemsSource="{Binding Files}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,0,0,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- 图片文件显示缩略图，其它显示类型图标。
+                                             宽度固定 40 是为了让每一行的左边缘对齐——
+                                             图片行和普通文件行的图标宽度不一样的话，列表看起来是歪的 -->
+                                        <Grid Grid.Column="0"
+                                              Width="40"
+                                              Height="30"
+                                              Margin="0,1,8,0"
+                                              VerticalAlignment="Top">
+                                            <Border CornerRadius="3"
+                                                    Background="{DynamicResource Brush.AccentSoft}"
+                                                    Visibility="{Binding ThumbFile,
+                                                                 Converter={StaticResource EmptyText},
+                                                                 ConverterParameter=invert}">
+                                                <!-- UniformToFill：小方框里铺满比留白好看 -->
+                                                <Image Stretch="UniformToFill"
+                                                       Source="{Binding ThumbFile,
+                                                                Converter={StaticResource ImagePath}}" />
+                                            </Border>
+
+                                            <!-- 普通文件、文件夹、以及缩略图没生成成功的图片 -->
+                                            <TextBlock FontFamily="{StaticResource Font.Icon}"
+                                                       FontSize="15"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource Brush.Accent}"
+                                                       Text="{Binding Converter={StaticResource EntryIcon}}"
+                                                       Visibility="{Binding ThumbFile,
+                                                                    Converter={StaticResource EmptyText}}" />
+                                        </Grid>
+
+                                        <!-- 用 StackPanel 纵向排：DockPanel 默认是水平停靠，
+                                             名字和路径会挤成一行 -->
+                                        <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                                            <TextBlock FontSize="13"
+                                                       TextWrapping="NoWrap"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Foreground="{DynamicResource Brush.TextPrimary}"
+                                                       Text="{Binding Name}" />
+
+                                            <!-- 路径可点：点了在资源管理器里定位到它。
+                                                 Content 绑的是整个条目对象，模板里才能拿到 Path 和 Exists -->
+                                            <Button Style="{StaticResource Style.PathLink}"
+                                                    Content="{Binding}"
+                                                    Click="RevealPath_Click"
+                                                    ToolTip="点击在资源管理器中打开">
+                                                <Button.ContentTemplate>
+                                                    <DataTemplate>
+                                                        <TextBlock FontSize="11"
+                                                                   TextWrapping="NoWrap"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   Text="{Binding Path}">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Foreground"
+                                                                            Value="{DynamicResource Brush.TextSecondary}" />
+                                                                    <Style.Triggers>
+                                                                        <!-- 路径已经失效 → 显示成灰色，一眼能看出来 -->
+                                                                        <DataTrigger Binding="{Binding Exists}" Value="False">
+                                                                            <Setter Property="Foreground"
+                                                                                    Value="{DynamicResource Brush.TextDisabled}" />
+                                                                        </DataTrigger>
+                                                                        <DataTrigger Binding="{Binding IsMouseOver,
+                                                                            RelativeSource={RelativeSource AncestorType=Button}}"
+                                                                                     Value="True">
+                                                                            <Setter Property="Foreground"
+                                                                                    Value="{DynamicResource Brush.Accent}" />
+                                                                            <Setter Property="TextDecorations" Value="Underline" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </DataTemplate>
+                                                </Button.ContentTemplate>
+                                            </Button>
+                                        </StackPanel>
+
+                                        <TextBlock Grid.Column="2"
+                                                   FontSize="11"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource Brush.TextSecondary}"
+                                                   Text="{Binding SizeText}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <!-- 时间 + 展开（条目装不下时才出现） -->
+                    <Grid Grid.Row="1" Margin="0,2,62,0">
+                        <TextBlock Style="{StaticResource Style.CardTime}" HorizontalAlignment="Left" />
+                        <ToggleButton x:Name="FileExpand"
+                                      Style="{StaticResource Style.ExpandToggle}"
+                                      HorizontalAlignment="Right"
+                                      IsChecked="{Binding IsExpanded, Mode=TwoWay}"
+                                      Click="FileExpand_Click"
+                                      Visibility="{Binding (ui:ClampBehavior.IsOverflowing),
+                                                   ElementName=FileEntries, Converter={StaticResource BoolToVis}}" />
+                    </Grid>
+
+                    <StackPanel Style="{StaticResource Style.CardActions}">
+                        <Button Style="{StaticResource Style.PinButton}"
+                                Content="{Binding Pinned, Converter={StaticResource PinGlyph}}"
+                                ToolTip="置顶"
+                                Click="Pin_Click" />
+                        <Button Style="{StaticResource Style.DeleteButton}"
+                                Content="{x:Static ui:Icons.Delete}"
+                                ToolTip="删除"
+                                Click="Delete_Click" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- 模板选择器：必须放在三个模板后面，StaticResource 不支持向前引用 -->
+        <sel:ClipCardTemplateSelector x:Key="CardSelector"
+                                      TextTemplate="{StaticResource Tpl.Card.Text}"
+                                      ImageTemplate="{StaticResource Tpl.Card.Image}"
+                                      FilesTemplate="{StaticResource Tpl.Card.Files}" />
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ══════ 顶部：搜索 + 筛选 ══════ -->
+        <StackPanel Grid.Row="0" Margin="12,12,12,4">
+
+            <!-- 搜索框 + 设置 -->
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Grid Grid.Column="0">
+                    <TextBox x:Name="SearchInput"
+                             Style="{StaticResource Style.SearchBox}"
+                             TextChanged="SearchInput_TextChanged" />
+
+                    <TextBlock FontFamily="{StaticResource Font.Icon}"
+                               FontSize="13"
+                               Margin="11,0,0,0"
+                               IsHitTestVisible="False"
+                               VerticalAlignment="Center"
+                               HorizontalAlignment="Left"
+                               Foreground="{DynamicResource Brush.TextSecondary}"
+                               Text="{x:Static ui:Icons.Search}" />
+
+                    <TextBlock FontSize="13"
+                               Margin="33,0,0,0"
+                               IsHitTestVisible="False"
+                               VerticalAlignment="Center"
+                               HorizontalAlignment="Left"
+                               Foreground="{DynamicResource Brush.TextSecondary}"
+                               Text="搜索历史…"
+                               Visibility="{Binding Text, ElementName=SearchInput,
+                                            Converter={StaticResource EmptyText}}" />
+
+                    <Button Style="{StaticResource Style.CircleButton}"
+                            Width="22" Height="22"
+                            Margin="0,0,6,0"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Content="{x:Static ui:Icons.Clear}"
+                            ToolTip="清除搜索"
+                            Click="ClearSearch_Click"
+                            Visibility="{Binding Text, ElementName=SearchInput,
+                                         Converter={StaticResource EmptyText},
+                                         ConverterParameter=invert}" />
+                </Grid>
+
+                <Button Grid.Column="1"
+                        Style="{StaticResource Style.CircleButton}"
+                        Margin="8,0,0,0"
+                        Width="30" Height="30"
+                        FontSize="14"
+                        VerticalAlignment="Center"
+                        Content="{x:Static ui:Icons.Settings}"
+                        ToolTip="设置"
+                        Click="OpenSettings_Click" />
+            </Grid>
+
+            <!-- 类型筛选：用 RadioButton 保证同时只选中一个 -->
+            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                <RadioButton x:Name="FilterAll" Style="{StaticResource Style.FilterPill}"
+                             Content="全部" IsChecked="True" Checked="Filter_Checked" Tag="All" />
+                <RadioButton x:Name="FilterText" Style="{StaticResource Style.FilterPill}"
+                             Content="文字" Checked="Filter_Checked" Tag="Text" />
+                <RadioButton x:Name="FilterImage" Style="{StaticResource Style.FilterPill}"
+                             Content="图片" Checked="Filter_Checked" Tag="Image" />
+                <RadioButton x:Name="FilterFiles" Style="{StaticResource Style.FilterPill}"
+                             Content="文件" Checked="Filter_Checked" Tag="File" />
+                <RadioButton x:Name="FilterFolders" Style="{StaticResource Style.FilterPill}"
+                             Content="文件夹" Checked="Filter_Checked" Tag="Folder" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ══════ 中部：卡片列表 ══════ -->
+        <Grid Grid.Row="1">
+            <ListBox x:Name="ClipList"
+                     Margin="12,4,12,0"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     HorizontalContentAlignment="Stretch"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     VirtualizingPanel.IsVirtualizing="True"
+                     VirtualizingPanel.VirtualizationMode="Recycling"
+                     VirtualizingPanel.IsVirtualizingWhenGrouping="True"
+                     ItemContainerStyle="{StaticResource Style.ClipItem}"
+                     ItemTemplateSelector="{StaticResource CardSelector}">
+                <ListBox.GroupStyle>
+                    <GroupStyle>
+                        <GroupStyle.HeaderTemplate>
+                            <DataTemplate>
+                                <TextBlock Style="{StaticResource Style.GroupHeader}" Text="{Binding Name}" />
+                            </DataTemplate>
+                        </GroupStyle.HeaderTemplate>
+                    </GroupStyle>
+                </ListBox.GroupStyle>
+                <ListBox.Resources>
+                    <Style TargetType="ScrollViewer" BasedOn="{StaticResource Style.ScrollViewer}" />
+                </ListBox.Resources>
+            </ListBox>
+
+            <!--
+                空状态。三种情况共用这一块，靠代码切换文案：
+                  一条记录都没有 / 搜索没结果 / 当前筛选下没内容
+                插画只在"真的一条都没有"时显示——搜索没结果时挂个大插图反而喧宾夺主。
+            -->
+            <StackPanel x:Name="EmptyState"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed">
+                <TextBlock x:Name="EmptyIcon"
+                           FontFamily="{StaticResource Font.Icon}"
+                           FontSize="40"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource Brush.IconIdle}"
+                           Text="{x:Static ui:Icons.TextDoc}" />
+                <TextBlock x:Name="EmptyTitle"
+                           FontSize="14"
+                           Margin="0,14,0,0"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           MaxWidth="280"
+                           Foreground="{DynamicResource Brush.TextPrimary}" />
+                <TextBlock x:Name="EmptyHint"
+                           FontSize="12"
+                           Margin="0,6,0,0"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource Brush.TextSecondary}" />
+            </StackPanel>
+        </Grid>
+
+        <!-- ══════ 底部：状态栏 ══════ -->
+        <Border Grid.Row="2" BorderThickness="0,1,0,0" BorderBrush="{DynamicResource Brush.Separator}">
+            <TextBlock x:Name="StatusText"
+                       FontSize="11"
+                       Margin="14,8,14,8"
+                       Foreground="{DynamicResource Brush.TextSecondary}"
+                       Text="还没有记录任何内容" />
+        </Border>
+    </Grid>
+</Window>
